@@ -1,0 +1,8 @@
+*.pyc
+.coverage
+.env
+.vscode
+\.*.sw*
+node_modules
+wildcards
+wildcards-stocks
