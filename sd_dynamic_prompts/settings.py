@@ -62,6 +62,14 @@ def on_ui_settings():
             section=section,
         ),
     )
+    shared.opts.add_option(
+        key="dp_enable_conditional_prompt",
+        info=shared.OptionInfo(
+            False,
+            label="Enable Conditional_Prompt: Resolve ${if ...}${elsif ...}${else}${endif} blocks before standard Dynamic Prompts expansion.",
+            section=section,
+        ),
+    )
 
     shared.opts.add_option(
         key="dp_auto_purge_cache",

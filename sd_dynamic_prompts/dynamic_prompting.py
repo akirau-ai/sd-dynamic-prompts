@@ -17,6 +17,7 @@ from modules.processing import fix_seed
 from modules.shared import opts
 
 from sd_dynamic_prompts import __version__, callbacks
+from sd_dynamic_prompts.conditional_prompt import preprocess_conditional_prompt
 from sd_dynamic_prompts.element_ids import make_element_id
 from sd_dynamic_prompts.generator_builder import GeneratorBuilder
 from sd_dynamic_prompts.helpers import (
@@ -46,6 +47,10 @@ if is_debug:
 
 def _get_effective_prompt(prompts: list[str], prompt: str) -> str:
     return prompts[0] if prompts else prompt
+
+
+def _uses_conditional_prompt(*prompts: str | None) -> bool:
+    return any(prompt and "${if " in prompt for prompt in prompts)
 
 
 def _remove_extra_networks(prompt: str) -> str:
@@ -395,6 +400,20 @@ class Script(scripts.Script):
                             gr.HTML(jinja_help)
 
                 with gr.Group():
+                    with gr.Accordion("Conditional_Prompt", open=False):
+                        enable_conditional_prompt = gr.Checkbox(
+                            label="Enable Conditional_Prompt",
+                            value=bool(getattr(opts, "dp_enable_conditional_prompt", False)),
+                            elem_id=make_element_id("enable-conditional-prompt"),
+                        )
+
+                        gr.HTML(
+                            "Resolve simple branch blocks such as "
+                            "<code>${if action==run}...${elsif action==stand}...${else}...${endif}</code> "
+                            "before standard Dynamic Prompts expansion.",
+                        )
+
+                with gr.Group():
                     with gr.Accordion("Advanced options", open=False):
                         gr.HTML(
                             "Some settings have been moved to the settings tab. Find them in the Dynamic Prompts section.",
@@ -447,6 +466,7 @@ class Script(scripts.Script):
             unlink_seed_from_prompt,
             disable_negative_prompt,
             enable_jinja_templates,
+            enable_conditional_prompt,
             no_image_generation,
             max_generations,
             magic_model,
@@ -470,6 +490,7 @@ class Script(scripts.Script):
         unlink_seed_from_prompt: bool,
         disable_negative_prompt: bool,
         enable_jinja_templates: bool,
+        enable_conditional_prompt: bool,
         no_image_generation: bool,
         max_generations: int,
         magic_model: str | None,
@@ -525,6 +546,19 @@ class Script(scripts.Script):
             original_negative_hr_prompt = original_negative_prompt
             hires_prompt_mode = "Default"
             remove_fp_extra_networks = False
+
+        if (
+            not enable_conditional_prompt
+            and _uses_conditional_prompt(
+                original_prompt,
+                original_negative_prompt,
+                original_hr_prompt,
+                original_negative_hr_prompt,
+            )
+        ):
+            raise ValueError(
+                "Conditional_Prompt syntax detected, but `Enable Conditional_Prompt` is OFF.",
+            )
 
         original_seed = p.seed
         num_images = p.n_iter * p.batch_size
@@ -582,6 +616,31 @@ class Script(scripts.Script):
                 negative_generator = generator_builder.create_generator()
             else:
                 negative_generator = generator
+
+            if enable_conditional_prompt:
+                original_prompt = preprocess_conditional_prompt(
+                    original_prompt,
+                    prompt_generator=generator,
+                    num_prompts=1,
+                )
+                if original_negative_prompt:
+                    original_negative_prompt = preprocess_conditional_prompt(
+                        original_negative_prompt,
+                        prompt_generator=negative_generator,
+                        num_prompts=1,
+                    )
+                if original_hr_prompt:
+                    original_hr_prompt = preprocess_conditional_prompt(
+                        original_hr_prompt,
+                        prompt_generator=generator,
+                        num_prompts=1,
+                    )
+                if original_negative_hr_prompt:
+                    original_negative_hr_prompt = preprocess_conditional_prompt(
+                        original_negative_hr_prompt,
+                        prompt_generator=negative_generator,
+                        num_prompts=1,
+                    )
 
             all_seeds = None
             if num_images and not unlink_seed_from_prompt:

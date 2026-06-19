@@ -72,6 +72,7 @@ def monkeypatch_webui(monkeypatch, tmp_path):
         "modules.shared": {
             "opts": types.SimpleNamespace(
                 dp_auto_purge_cache=True,
+                dp_enable_conditional_prompt=False,
                 dp_ignore_whitespace=True,
                 dp_limit_jinja_prompts=False,
                 dp_magicprompt_batch_size=1,
