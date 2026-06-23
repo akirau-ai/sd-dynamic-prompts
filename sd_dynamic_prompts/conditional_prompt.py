@@ -17,6 +17,14 @@ class Branch:
     body: str
 
 
+@dataclass(frozen=True)
+class AssignmentMatch:
+    start: int
+    end: int
+    name: str
+    expression: str
+
+
 _BLOCK_PATTERN = re.compile(
     r"\$\{if\s+(?P<if_cond>[^}]+)\}(?P<body>.*?)\$\{endif\}",
     re.DOTALL,
@@ -24,7 +32,11 @@ _BLOCK_PATTERN = re.compile(
 _ELSIF_PATTERN = re.compile(r"\$\{elsif\s+([^}]+)\}")
 _ELSE_PATTERN = re.compile(r"\$\{else\}")
 _COMPARISON_PATTERN = re.compile(
-    r"^\s*([A-Za-z_-][A-Za-z0-9_-]*)\s*(==|!=)\s*(.*?)\s*$",
+    r"^\s*([A-Za-z_-][A-Za-z0-9_-]*)\s*(==|!=|\*=|!\*=)\s*(.*?)\s*$",
+    re.DOTALL,
+)
+_ASSIGNMENT_START_PATTERN = re.compile(
+    r"\$\{\s*([A-Za-z_-][A-Za-z0-9_-]*)\s*=",
     re.DOTALL,
 )
 
@@ -40,16 +52,17 @@ def preprocess_conditional_prompt(
         return template
 
     validate_conditional_prompt(template)
+    variables = _sample_assignments(
+        template,
+        prompt_generator=prompt_generator,
+        num_prompts=num_prompts,
+        seeds=seeds,
+    )
+    materialized_template = _replace_assignments(template, variables)
 
     return _BLOCK_PATTERN.sub(
-        lambda match: _resolve_block(
-            match,
-            template=template,
-            prompt_generator=prompt_generator,
-            num_prompts=num_prompts,
-            seeds=seeds,
-        ),
-        template,
+        lambda match: _resolve_block(match, variables=variables),
+        materialized_template,
     )
 
 
@@ -82,20 +95,11 @@ def validate_conditional_prompt(template: str) -> None:
 def _resolve_block(
     match: re.Match[str],
     *,
-    template: str,
-    prompt_generator: PromptGenerator,
-    num_prompts: int,
-    seeds: list[int] | None,
+    variables: dict[str, str],
 ) -> str:
     branches = _parse_branches(
         if_condition=match.group("if_cond"),
         body=match.group("body"),
-    )
-    variables = _sample_assignments(
-        template,
-        prompt_generator=prompt_generator,
-        num_prompts=num_prompts,
-        seeds=seeds,
     )
 
     for branch in branches:
@@ -156,10 +160,47 @@ def _sample_assignments(
     seeds: list[int] | None,
 ) -> dict[str, str]:
     variables: dict[str, str] = {}
-    for name, expr in _iter_assignments(template):
-        sampled = prompt_generator.generate(expr, num_prompts, seeds=seeds) or [""]
-        variables[name] = sampled[0]
+    assignments = list(_iter_assignments(template))
+    shared_sampler = _get_shared_assignment_sampler(
+        prompt_generator=prompt_generator,
+        seeds=seeds,
+    )
+
+    if shared_sampler is not None:
+        for assignment in assignments:
+            variables[assignment.name] = shared_sampler(assignment.expression)
+        return variables
+
+    for assignment in assignments:
+        sampled = (
+            prompt_generator.generate(
+                assignment.expression,
+                num_prompts,
+                seeds=seeds,
+            )
+            or [""]
+        )
+        variables[assignment.name] = sampled[0]
     return variables
+
+
+def _get_shared_assignment_sampler(
+    *,
+    prompt_generator: PromptGenerator,
+    seeds: list[int] | None,
+):
+    context = getattr(prompt_generator, "_context", None)
+    if context is None or not hasattr(context, "sample_prompts") or not hasattr(context, "rand"):
+        return None
+
+    if seeds:
+        context.rand.seed(seeds[0])
+
+    def sample(expression: str) -> str:
+        prompts = context.sample_prompts(expression, 1)
+        return str(next(iter(prompts), ""))
+
+    return sample
 
 
 def _iter_assignments(template: str):
@@ -169,11 +210,7 @@ def _iter_assignments(template: str):
         if start == -1:
             return
 
-        name_match = re.match(
-            r"\$\{\s*([A-Za-z_-][A-Za-z0-9_-]*)\s*=",
-            template[start:],
-            re.DOTALL,
-        )
+        name_match = _ASSIGNMENT_START_PATTERN.match(template[start:])
         if name_match is None:
             position = start + 2
             continue
@@ -186,7 +223,12 @@ def _iter_assignments(template: str):
                 f"Unterminated Conditional_Prompt assignment for `{name}`.",
             )
 
-        yield name, template[expr_start:expr_end].strip()
+        yield AssignmentMatch(
+            start=start,
+            end=expr_end + 1,
+            name=name,
+            expression=template[expr_start:expr_end].strip(),
+        )
         position = expr_end + 1
 
 
@@ -201,6 +243,18 @@ def _find_assignment_end(template: str, expr_start: int) -> int:
                 return index
             brace_depth -= 1
     return -1
+
+
+def _replace_assignments(template: str, variables: dict[str, str]) -> str:
+    output: list[str] = []
+    position = 0
+    for assignment in _iter_assignments(template):
+        output.append(template[position:assignment.start])
+        output.append(f"${{{assignment.name}={variables[assignment.name]}}}")
+        position = assignment.end
+
+    output.append(template[position:])
+    return "".join(output)
 
 
 def _evaluate_condition(condition: str, variables: dict[str, str]) -> bool:
@@ -218,22 +272,33 @@ def _evaluate_comparison(condition: str, variables: dict[str, str]) -> bool:
     if comparison is None:
         raise ConditionalPromptError(
             f"Unsupported Conditional_Prompt expression: {condition!r}. "
-            "Supported forms are `name==value`, `name!=value`, and uppercase `AND` combinations.",
+            "Supported forms are `name==value`, `name!=value`, `name*=value`, `name!*=value`, and uppercase `AND` combinations.",
         )
 
-    variable_name, operator, expected_value = comparison.groups()
-    actual_value = variables.get(variable_name)
-    if actual_value is None:
+    left_value, operator, right_value = comparison.groups()
+    left = left_value.strip()
+    right = right_value.strip()
+
+    if left in variables:
+        actual = variables[left].strip()
+        expected = right
+    elif right in variables:
+        actual = left
+        expected = variables[right].strip()
+    else:
         raise ConditionalPromptError(
-            f"Conditional_Prompt variable `{variable_name}` is not defined.",
+            "Conditional_Prompt comparison must reference a defined variable. "
+            f"Got {condition!r}. Defined variables: {', '.join(sorted(variables)) or '(none)'}.",
         )
 
-    actual = actual_value.strip()
-    expected = expected_value.strip()
     if operator == "==":
         return actual == expected
     if operator == "!=":
         return actual != expected
+    if operator == "*=":
+        return expected in actual
+    if operator == "!*=":
+        return expected not in actual
     raise ConditionalPromptError(f"Unsupported Conditional_Prompt operator: {operator!r}.")
 
 
@@ -247,7 +312,7 @@ def _validate_condition(condition: str) -> None:
         if _COMPARISON_PATTERN.match(part) is None:
             raise ConditionalPromptError(
                 f"Unsupported Conditional_Prompt expression: {condition!r}. "
-                "Supported forms are `name==value`, `name!=value`, and uppercase `AND` combinations.",
+                "Supported forms are `name==value`, `name!=value`, `name*=value`, `name!*=value`, and uppercase `AND` combinations.",
             )
 
 

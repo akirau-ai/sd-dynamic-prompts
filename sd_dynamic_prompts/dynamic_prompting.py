@@ -53,6 +53,33 @@ def _uses_conditional_prompt(*prompts: str | None) -> bool:
     return any(prompt and "${if " in prompt for prompt in prompts)
 
 
+def _materialize_conditional_templates(
+    template: str | None,
+    *,
+    prompt_generator,
+    count: int,
+    seeds: list[int] | None,
+) -> list[str]:
+    if not template:
+        return [""] * count
+
+    if "${if " not in template:
+        return [template] * count
+
+    output: list[str] = []
+    for index in range(count):
+        prompt_seeds = None if seeds is None else [seeds[index]]
+        output.append(
+            preprocess_conditional_prompt(
+                template,
+                prompt_generator=prompt_generator,
+                num_prompts=1,
+                seeds=prompt_seeds,
+            ),
+        )
+    return output
+
+
 def _remove_extra_networks(prompt: str) -> str:
     try:
         from modules import extra_networks
@@ -96,6 +123,9 @@ def _generate_prompt_variants(
     if use_raw_prompt or prompt_generator is None:
         return repeat_iterable_to_length([prompt_text], count)
 
+    if not prompt_text:
+        return repeat_iterable_to_length([""], count)
+
     generated_prompts = prompt_generator.generate(
         prompt_text,
         count,
@@ -103,6 +133,34 @@ def _generate_prompt_variants(
     ) or [""]
 
     return repeat_iterable_to_length(generated_prompts, count)
+
+
+def _generate_prompt_variants_from_templates(
+    prompt_templates: list[str],
+    *,
+    use_raw_prompt: bool,
+    prompt_generator,
+    seeds: list[int] | None = None,
+) -> list[str]:
+    if use_raw_prompt or prompt_generator is None:
+        return list(prompt_templates)
+
+    generated_prompts: list[str] = []
+    for index, prompt_template in enumerate(prompt_templates):
+        if not prompt_template:
+            generated_prompts.append("")
+            continue
+
+        seed = None if seeds is None else seeds[index]
+        prompt_seeds = None if seed is None else [seed]
+        prompt = prompt_generator.generate(
+            prompt_template,
+            1,
+            seeds=prompt_seeds,
+        ) or [""]
+        generated_prompts.append(prompt[0])
+
+    return generated_prompts
 
 
 loaded_count = 0
@@ -130,6 +188,7 @@ def _get_hr_fix_prompts(
     use_raw_prompt: bool = False,
     prompt_generator=None,
     seeds: list[int] | None = None,
+    hr_prompt_templates: list[str] | None = None,
 ) -> list[str]:
     prompt_count = len(prompts)
     base_prompts = list(prompts)
@@ -144,12 +203,21 @@ def _get_hr_fix_prompts(
         return base_prompts
 
     if hires_prompt_mode == "Append":
-        hr_prompts = _generate_prompt_variants(
-            original_hr_prompt,
-            prompt_count,
-            use_raw_prompt=use_raw_prompt,
-            prompt_generator=prompt_generator,
-            seeds=seeds,
+        hr_prompts = (
+            _generate_prompt_variants_from_templates(
+                hr_prompt_templates,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
+            if hr_prompt_templates is not None
+            else _generate_prompt_variants(
+                original_hr_prompt,
+                prompt_count,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
         )
         return [
             f"{base_prompt}, {hires_prompt}" if base_prompt and hires_prompt else (base_prompt or hires_prompt)
@@ -157,12 +225,21 @@ def _get_hr_fix_prompts(
         ]
 
     if hires_prompt_mode == "Prepend":
-        hr_prompts = _generate_prompt_variants(
-            original_hr_prompt,
-            prompt_count,
-            use_raw_prompt=use_raw_prompt,
-            prompt_generator=prompt_generator,
-            seeds=seeds,
+        hr_prompts = (
+            _generate_prompt_variants_from_templates(
+                hr_prompt_templates,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
+            if hr_prompt_templates is not None
+            else _generate_prompt_variants(
+                original_hr_prompt,
+                prompt_count,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
         )
         return [
             f"{hires_prompt}, {base_prompt}" if base_prompt and hires_prompt else (hires_prompt or base_prompt)
@@ -170,22 +247,40 @@ def _get_hr_fix_prompts(
         ]
 
     if hires_prompt_mode == "Default":
-        return _generate_prompt_variants(
+        return (
+            _generate_prompt_variants_from_templates(
+                hr_prompt_templates,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
+            if hr_prompt_templates is not None
+            else _generate_prompt_variants(
+                original_hr_prompt,
+                prompt_count,
+                use_raw_prompt=use_raw_prompt,
+                prompt_generator=prompt_generator,
+                seeds=seeds,
+            )
+        )
+
+    # Preserve existing Prompt S/R-style behavior by treating the already-processed
+    # hires prompt as the authoritative template and only expanding it if needed.
+    return (
+        _generate_prompt_variants_from_templates(
+            hr_prompt_templates,
+            use_raw_prompt=use_raw_prompt,
+            prompt_generator=prompt_generator,
+            seeds=seeds,
+        )
+        if hr_prompt_templates is not None
+        else _generate_prompt_variants(
             original_hr_prompt,
             prompt_count,
             use_raw_prompt=use_raw_prompt,
             prompt_generator=prompt_generator,
             seeds=seeds,
         )
-
-    # Preserve existing Prompt S/R-style behavior by treating the already-processed
-    # hires prompt as the authoritative template and only expanding it if needed.
-    return _generate_prompt_variants(
-        original_hr_prompt,
-        prompt_count,
-        use_raw_prompt=use_raw_prompt,
-        prompt_generator=prompt_generator,
-        seeds=seeds,
     )
 
 
@@ -525,6 +620,8 @@ class Script(scripts.Script):
             p.all_negative_prompts,
             p.negative_prompt,
         )
+        raw_prompt_for_metadata = original_prompt
+        raw_negative_prompt_for_metadata = original_negative_prompt
         hr_fix_enabled = getattr(p, "enable_hr", False)
 
         # all_hr_prompts (and the other hr prompt related stuff)
@@ -617,31 +714,6 @@ class Script(scripts.Script):
             else:
                 negative_generator = generator
 
-            if enable_conditional_prompt:
-                original_prompt = preprocess_conditional_prompt(
-                    original_prompt,
-                    prompt_generator=generator,
-                    num_prompts=1,
-                )
-                if original_negative_prompt:
-                    original_negative_prompt = preprocess_conditional_prompt(
-                        original_negative_prompt,
-                        prompt_generator=negative_generator,
-                        num_prompts=1,
-                    )
-                if original_hr_prompt:
-                    original_hr_prompt = preprocess_conditional_prompt(
-                        original_hr_prompt,
-                        prompt_generator=generator,
-                        num_prompts=1,
-                    )
-                if original_negative_hr_prompt:
-                    original_negative_hr_prompt = preprocess_conditional_prompt(
-                        original_negative_hr_prompt,
-                        prompt_generator=negative_generator,
-                        num_prompts=1,
-                    )
-
             all_seeds = None
             if num_images and not unlink_seed_from_prompt:
                 p.all_seeds, p.all_subseeds = get_seeds(
@@ -653,14 +725,149 @@ class Script(scripts.Script):
                 )
                 all_seeds = p.all_seeds
 
-            all_prompts, all_negative_prompts = generate_prompts(
-                prompt_generator=generator,
-                negative_prompt_generator=negative_generator,
-                prompt=original_prompt,
-                negative_prompt=original_negative_prompt,
-                num_prompts=num_images,
-                seeds=all_seeds,
+            prompt_uses_conditional = _uses_conditional_prompt(original_prompt)
+            negative_prompt_uses_conditional = _uses_conditional_prompt(
+                original_negative_prompt,
             )
+            hr_prompt_uses_conditional = _uses_conditional_prompt(original_hr_prompt)
+            hr_negative_prompt_uses_conditional = _uses_conditional_prompt(
+                original_negative_hr_prompt,
+            )
+
+            hr_prompt_templates = None
+            hr_negative_prompt_templates = None
+            if enable_conditional_prompt:
+                if num_images:
+                    prompt_templates = (
+                        _materialize_conditional_templates(
+                            original_prompt,
+                            prompt_generator=generator,
+                            count=num_images,
+                            seeds=all_seeds,
+                        )
+                        if prompt_uses_conditional
+                        else None
+                    )
+                    negative_prompt_templates = (
+                        _materialize_conditional_templates(
+                            original_negative_prompt,
+                            prompt_generator=negative_generator,
+                            count=num_images,
+                            seeds=all_seeds,
+                        )
+                        if negative_prompt_uses_conditional
+                        else None
+                    )
+                    hr_prompt_templates = (
+                        _materialize_conditional_templates(
+                            original_hr_prompt,
+                            prompt_generator=generator,
+                            count=num_images,
+                            seeds=all_seeds,
+                        )
+                        if original_hr_prompt and hr_prompt_uses_conditional
+                        else None
+                    )
+                    hr_negative_prompt_templates = (
+                        _materialize_conditional_templates(
+                            original_negative_hr_prompt,
+                            prompt_generator=negative_generator,
+                            count=num_images,
+                            seeds=all_seeds,
+                        )
+                        if (
+                            original_negative_hr_prompt
+                            and hr_negative_prompt_uses_conditional
+                        )
+                        else None
+                    )
+                    if prompt_templates:
+                        original_prompt = prompt_templates[0]
+                    if negative_prompt_templates:
+                        original_negative_prompt = negative_prompt_templates[0]
+                    if hr_prompt_templates:
+                        original_hr_prompt = hr_prompt_templates[0]
+                    if hr_negative_prompt_templates:
+                        original_negative_hr_prompt = hr_negative_prompt_templates[0]
+
+                    all_prompts = (
+                        _generate_prompt_variants_from_templates(
+                            prompt_templates,
+                            use_raw_prompt=False,
+                            prompt_generator=generator,
+                            seeds=all_seeds,
+                        )
+                        if prompt_templates is not None
+                        else _generate_prompt_variants(
+                            original_prompt,
+                            num_images,
+                            use_raw_prompt=False,
+                            prompt_generator=generator,
+                            seeds=all_seeds,
+                        )
+                    )
+                    all_negative_prompts = (
+                        _generate_prompt_variants_from_templates(
+                            negative_prompt_templates,
+                            use_raw_prompt=False,
+                            prompt_generator=negative_generator,
+                            seeds=all_seeds,
+                        )
+                        if negative_prompt_templates is not None
+                        else _generate_prompt_variants(
+                            original_negative_prompt,
+                            num_images,
+                            use_raw_prompt=False,
+                            prompt_generator=negative_generator,
+                            seeds=all_seeds,
+                        )
+                    )
+                else:
+                    if prompt_uses_conditional:
+                        original_prompt = preprocess_conditional_prompt(
+                            original_prompt,
+                            prompt_generator=generator,
+                            num_prompts=1,
+                        )
+                    if original_negative_prompt and negative_prompt_uses_conditional:
+                        original_negative_prompt = preprocess_conditional_prompt(
+                            original_negative_prompt,
+                            prompt_generator=negative_generator,
+                            num_prompts=1,
+                        )
+                    if original_hr_prompt and hr_prompt_uses_conditional:
+                        original_hr_prompt = preprocess_conditional_prompt(
+                            original_hr_prompt,
+                            prompt_generator=generator,
+                            num_prompts=1,
+                        )
+                    if (
+                        original_negative_hr_prompt
+                        and hr_negative_prompt_uses_conditional
+                    ):
+                        original_negative_hr_prompt = preprocess_conditional_prompt(
+                            original_negative_hr_prompt,
+                            prompt_generator=negative_generator,
+                            num_prompts=1,
+                        )
+
+                    all_prompts, all_negative_prompts = generate_prompts(
+                        prompt_generator=generator,
+                        negative_prompt_generator=negative_generator,
+                        prompt=original_prompt,
+                        negative_prompt=original_negative_prompt,
+                        num_prompts=num_images,
+                        seeds=all_seeds,
+                    )
+            else:
+                all_prompts, all_negative_prompts = generate_prompts(
+                    prompt_generator=generator,
+                    negative_prompt_generator=negative_generator,
+                    prompt=original_prompt,
+                    negative_prompt=original_negative_prompt,
+                    num_prompts=num_images,
+                    seeds=all_seeds,
+                )
 
         except GeneratorException as e:
             logger.exception(e)
@@ -693,10 +900,13 @@ class Script(scripts.Script):
 
         if opts.dp_write_raw_template:
             params = p.extra_generation_params
-            if original_prompt and "Template" not in params:
-                params["Template"] = original_prompt
-            if original_negative_prompt and "Negative Template" not in params:
-                params["Negative Template"] = original_negative_prompt
+            if raw_prompt_for_metadata and "Template" not in params:
+                params["Template"] = raw_prompt_for_metadata
+            if (
+                raw_negative_prompt_for_metadata
+                and "Negative Template" not in params
+            ):
+                params["Negative Template"] = raw_negative_prompt_for_metadata
 
         p.all_prompts = all_prompts
         p.all_negative_prompts = all_negative_prompts
@@ -721,11 +931,13 @@ class Script(scripts.Script):
                 use_raw_prompt=hr_prompt_raw,
                 prompt_generator=generator,
                 seeds=hr_prompt_seeds,
+                hr_prompt_templates=hr_prompt_templates,
             )
             p.all_hr_negative_prompts = _get_hr_fix_prompts(
                 all_negative_prompts,
                 original_negative_hr_prompt,
                 original_negative_prompt,
                 use_raw_prompt=True,
+                hr_prompt_templates=hr_negative_prompt_templates,
             )
 callbacks.register_settings()  # Settings need to be registered early, see #754.

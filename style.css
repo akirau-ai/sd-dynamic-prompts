@@ -55,6 +55,24 @@
     color: rgb(121, 240, 10) !important;
 }
 
+.sddp-conditional-prompt-warning {
+    display: none;
+    width: 100%;
+    margin: 0.4em 0 0 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #d84a5f;
+    font-size: 0.82em;
+    line-height: 1.35;
+    font-weight: 500;
+    opacity: 0.98;
+    box-sizing: border-box;
+    white-space: normal;
+    word-break: break-word;
+}
+
 .tree-leaf { position: relative; }
 .tree-leaf .tree-child-leaves { display: block; margin-left: 15px; }
 .tree-leaf .hidden { display: none; }

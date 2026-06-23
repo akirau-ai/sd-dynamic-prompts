@@ -106,6 +106,45 @@ def generate_prompts(
     return all_prompts, repeat_iterable_to_length(all_negative_prompts, num_prompts)
 
 
+def generate_prompts_from_templates(
+    prompt_generator: PromptGenerator,
+    negative_prompt_generator: PromptGenerator,
+    prompt_templates: list[str],
+    negative_prompt_templates: list[str | None],
+    seeds: list[int] | None,
+) -> tuple[list[str], list[str]]:
+    all_prompts: list[str] = []
+    all_negative_prompts: list[str] = []
+
+    for index, prompt_template in enumerate(prompt_templates):
+        seed = None if seeds is None else seeds[index]
+        prompt_seeds = None if seed is None else [seed]
+
+        if prompt_template:
+            prompt = prompt_generator.generate(
+                prompt_template,
+                1,
+                seeds=prompt_seeds,
+            ) or [""]
+            all_prompts.append(prompt[0])
+        else:
+            all_prompts.append("")
+
+        negative_template = negative_prompt_templates[index]
+        negative_seeds = prompt_seeds if negative_template else None
+        if negative_template:
+            negative_prompt = negative_prompt_generator.generate(
+                negative_template,
+                1,
+                seeds=negative_seeds,
+            ) or [""]
+            all_negative_prompts.append(negative_prompt[0])
+        else:
+            all_negative_prompts.append("")
+
+    return all_prompts, all_negative_prompts
+
+
 def generate_prompt_cross_product(
     prompts: list[str],
     negative_prompts: list[str],
