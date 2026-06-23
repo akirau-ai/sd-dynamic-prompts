@@ -1,3 +1,17 @@
+## About This Repository
+
+This repository is an independently maintained version of sd-dynamic-prompts.
+
+The original project can be found here:
+https://github.com/adieyal/sd-dynamic-prompts
+
+This version includes compatibility fixes, bug fixes, and minor usability improvements.
+
+It is maintained primarily to keep the extension functional with current Stable Diffusion WebUI forks. Compatibility with future upstream changes is not guaranteed.
+
+All credit for the original project goes to the original authors and contributors. This repository retains the original MIT License.
+
+
 # Stable Diffusion Dynamic Prompts extension
 A custom extension for [AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) that implements an expressive template language for random or combinatorial prompt generation along with features to support deep wildcard directory structures.
 
